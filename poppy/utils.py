@@ -23,6 +23,18 @@ import astropy.io.fits as fits
 
 import poppy
 
+from importlib import reload
+
+from . import accel_math
+
+import numpy
+if accel_math._USE_CUPY:
+    import cupy as np
+    rnd = numpy.round
+else:
+    import numpy as np
+    rnd = np.round
+
 try:
     import pyfftw
 except ImportError:
@@ -269,7 +281,7 @@ def display_psf(hdulist_or_filename, ext=0, vmin=1e-7, vmax=1e-1,
                 orientation=colorbar_orientation
             )
         if scale.lower() == 'log':
-            ticks = np.logspace(np.log10(vmin), np.log10(vmax), int(np.round(np.log10(vmax / vmin) + 1)))
+            ticks = np.logspace(np.log10(vmin), np.log10(vmax), int(rnd(np.log10(vmax / vmin) + 1)))
             if colorbar_orientation == 'horizontal' and vmax == 1e-1 and vmin == 1e-8:
                 ticks = [1e-8, 1e-6, 1e-4, 1e-2, 1e-1]  # looks better
             cb.set_ticks(ticks)
@@ -1088,7 +1100,7 @@ def pad_to_oversample(array, oversample):
     padToSize
     """
     npix = array.shape[0]
-    n = int(np.round(npix * oversample))
+    n = int(rnd(npix * oversample))
     padded = np.zeros(shape=(n, n), dtype=array.dtype)
     n0 = float(npix) * (oversample - 1) / 2
     n1 = n0 + npix
@@ -1168,8 +1180,10 @@ def pad_or_crop_to_shape(array, target_shape):
 
     lx, ly = array.shape
     lx_w, ly_w = target_shape
-    border_x = np.abs(lx - lx_w) // 2
-    border_y = np.abs(ly - ly_w) // 2
+#     border_x = np.abs(lx - lx_w) // 2
+#     border_y = np.abs(ly - ly_w) // 2
+    border_x = abs(lx - lx_w) // 2
+    border_y = abs(ly - ly_w) // 2
 
     if (lx < lx_w) or (ly < ly_w):
         _log.debug("Array shape " + str(array.shape) + " is smaller than desired shape " + str(

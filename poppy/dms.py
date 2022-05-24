@@ -1,7 +1,6 @@
 # Code for modeling deformable mirrors
 # By Neil Zimmerman based on Marshall's dms.py in the gpipsfs repo
 
-import numpy as np
 import matplotlib.pyplot as plt
 import scipy.ndimage.interpolation
 import scipy.signal
@@ -11,6 +10,15 @@ from abc import ABC, abstractmethod
 
 from . import utils, accel_math, poppy_core, optics
 
+import numpy
+if accel_math._USE_CUPY:
+    import cupy as np
+    import cupyx.scipy.ndimage as ndimage
+    import cupyx.scipy.signal as signal
+else:
+    import numpy as np
+    import scipy.ndimage as ndimage
+    import scipy.signal as signal
 import logging
 
 _log = logging.getLogger('poppy')
@@ -110,7 +118,7 @@ class ContinuousDeformableMirror(optics.AnalyticOpticalElement):
         self.pupil_center = (dm_shape[0] - 1.) / 2  # center of clear aperture in actuator units
 
         # the poppy-standard attribute 'pupil_diam' is used for default display or input wavefront sizes
-        self.pupil_diam = max(np.max(dm_shape) * self.actuator_spacing, self.radius_reflective*2)  # see note above
+        self.pupil_diam = max(numpy.max(dm_shape) * self.actuator_spacing, self.radius_reflective*2)  # see note above
 
         self.include_actuator_print_through = include_actuator_print_through
 
@@ -156,7 +164,7 @@ class ContinuousDeformableMirror(optics.AnalyticOpticalElement):
         else:
             raise RuntimeError("must supply exactly one of the filename and hdulist arguments.")
 
-        self.influence_func = hdulist[0].data.copy()
+        self.influence_func = np.array(hdulist[0].data.copy())
         self.influence_header = hdulist[0].header.copy()
         if len(self.influence_func.shape) != 2:
             raise RuntimeError("Influence function file must contain a 2D array.")
@@ -182,7 +190,7 @@ class ContinuousDeformableMirror(optics.AnalyticOpticalElement):
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            return scipy.ndimage.zoom(self.influence_func, scale)
+            return ndimage.zoom(self.influence_func, scale)
 
     def _get_rescaled_actuator_surface(self, pixelscale):
         """ Return the actuator surface print-through, rescaled onto the
@@ -405,7 +413,7 @@ class ContinuousDeformableMirror(optics.AnalyticOpticalElement):
                     continue
 
                 # 2d Gaussian
-                if accel_math._USE_NUMEXPR:
+                if accel_math._USE_NUMEXPR and not accel_math._USE_CUPY:
                     roversigma2 = ne.evaluate("((x - xc)**2 + (y-yc)**2)/sigma**2")
                 else:
                     roversigma2 = ((x - xc) ** 2 + (y - yc) ** 2) / sigma ** 2
@@ -427,12 +435,11 @@ class ContinuousDeformableMirror(optics.AnalyticOpticalElement):
 
         # check for flips
         surface, act_mask = self._get_surface_arrays_with_orientation()
-
+        
         if self.include_actuator_mask:
             target_val = (surface * act_mask).ravel()
         else:
             target_val = surface.ravel()
-
         # Compute the 'surface trace', i.e the values for each actuator, projected
         # into the appropriate locations on the detector. For each actuator, we
         # weight the surface value across a 2x2 square of pixels to account for subpixel
@@ -454,16 +461,19 @@ class ContinuousDeformableMirror(optics.AnalyticOpticalElement):
                 xweight = fracpart[1] if ix==1 else (1-fracpart[1])
                 yweight = fracpart[0] if iy==1 else (1-fracpart[0])
                 try:
-                    self._surface_trace_flat[self._act_ind_flat[0] + ix + iy*wave.shape[0]] = (xweight*yweight).flat*target_val
+#                     self._surface_trace_flat[self._act_ind_flat[0] + ix + iy*wave.shape[0]]=(xweight*yweight).flat*target_val
+                    self._surface_trace_flat[self._act_ind_flat[0] + ix + iy*wave.shape[0]]=(xweight*yweight).flatten()*target_val
+                    # for some reason you can't use .flat and multiply the array in CuPy, you have to use .flatten()
+                    # don't know if this has other implications but seems to work as intended on normal numpy arrays
                 except:
                     pass # Ignore any actuators outside the FoV
-
-
+        
         # Now we can convolve with the influence function to get the full continuous surface.
         influence_rescaled = self._get_rescaled_influence_func(wave.pixelscale)
-        dm_surface = scipy.signal.fftconvolve(self._surface_trace_flat.reshape(wave.shape),
-                                              influence_rescaled, mode='same')
-
+        dm_surface = signal.fftconvolve(self._surface_trace_flat.reshape(wave.shape), influence_rescaled, mode='same')
+#         import misc
+#         try: misc.myimshow(dm_surface.get(), 'dm_surface from cupy')
+#         except: misc.myimshow(dm_surface, 'dm_surface')
         return dm_surface
 
     def _setup_actuator_indices(self, wave):
@@ -718,9 +728,9 @@ class SegmentedDeformableMirror(ABC):
 
         if segnum not in self.segmentlist:
             raise ValueError("Segment {} is not present for this DM instance.".format(segnum))
-        self._surface[segnum] = [piston.to(u.meter).value,
-                                 tip.to(u.radian).value,
-                                 tilt.to(u.radian).value]
+        self._surface[segnum] = np.array([piston.to(u.meter).value,
+                                          tip.to(u.radian).value,
+                                          tilt.to(u.radian).value])
 
     def _setup_arrays(self, npix, pixelscale, wave=None):
         """ Set up the arrays to compute an OPD into.

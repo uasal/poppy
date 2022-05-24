@@ -1,7 +1,6 @@
 # Tests for individual Optic classes
 
 import matplotlib.pyplot as pl
-import numpy as np
 import astropy.io.fits as fits
 import astropy.units as u
 
@@ -10,9 +9,14 @@ from .. import optics
 from .. import zernike
 from .test_core import check_wavefront
 
+from .. import accel_math
+import numpy
+if accel_math._USE_CUPY:
+    import cupy as np
+else: 
+    import numpy as np
+
 wavelength=1e-6
-
-
 
 #def test_OpticalElement():
 #    pass
@@ -91,7 +95,7 @@ def test_shifting_optics( npix=30,  grid_size = 3, display=False):
     Tests the fix for #247
     """
     import poppy
-    pixsize =grid_size/npix
+    pixsize = grid_size/npix
     shift_size = np.round(0.2/pixsize)*pixsize  # by construction, an integer # of pixels
 
     # Create a reference array

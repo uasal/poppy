@@ -4,13 +4,22 @@ import astropy.units as u
 import logging
 import time
 
+from importlib import reload
+
 import poppy
 from poppy.poppy_core import PlaneType, Wavefront, BaseWavefront, BaseOpticalSystem, FITSOpticalElement
 from . import utils
 from . import accel_math
+
+import numpy
+if accel_math._USE_CUPY:
+    import cupy as np
+else:
+    import numpy as np
+    
 if accel_math._USE_NUMEXPR:
     import numexpr as ne
-    pi = np.pi  # needed for evaluation inside numexpr strings.
+    pi = numpy.pi  # needed for evaluation inside numexpr strings.
 
 _log = logging.getLogger('poppy')
 
@@ -69,7 +78,7 @@ class QuadPhase(poppy.optics.AnalyticOpticalElement):
             # OPD should be flat
             _log.debug("infinite radius of curvature -> quad phase becomes 0")
             return 0
-        if accel_math._USE_NUMEXPR:
+        if accel_math._USE_NUMEXPR and not accel_math._USE_CUPY:
             opd = ne.evaluate("(x ** 2 + y ** 2) / (2.0 * z)")
         else:
             opd = (x ** 2 + y ** 2)  / (2.0 *z)
@@ -476,7 +485,7 @@ class FresnelWavefront(BaseWavefront):
         """
         if z is None:
             z = self.z
-        return self.w_0 * np.sqrt(1.0 + ((z - self.z_w0) / self.z_r) ** 2)
+        return self.w_0 * numpy.sqrt(1.0 + ((z - self.z_w0) / self.z_r) ** 2)
 
     #  methods supporting coordinates, including switching between distance and angular units
 
@@ -511,7 +520,7 @@ class FresnelWavefront(BaseWavefront):
         else:
             pixel_scale_x, pixel_scale_y = pixelscale_mpix, pixelscale_mpix
 
-        if accel_math._USE_NUMEXPR:
+        if accel_math._USE_NUMEXPR and not accel_math._USE_CUPY:
             return ne.evaluate("pixel_scale_y * y"), ne.evaluate("pixel_scale_x * x")
         else:
             return pixel_scale_y * y, pixel_scale_x * x
@@ -571,7 +580,8 @@ class FresnelWavefront(BaseWavefront):
     def fov(self):
         """ FOV in arcseconds, if applicable"""
         if self.angular_coordinates:
-            return np.asarray(self.wavefront.shape) * u.pixel * self.pixelscale
+#             return np.asarray(self.wavefront.shape) * u.pixel * self.pixelscale
+            return numpy.asarray(self.wavefront.shape) * u.pixel * self.pixelscale
         else:
             return None
 
@@ -705,7 +715,7 @@ class FresnelWavefront(BaseWavefront):
             _log.warning("z= {0:0.2e}, has no units, assuming meters ".format(dz))
             z_direct = dz
 
-        if np.abs(dz) < 1 * u.Angstrom:
+        if abs(dz) < 1 * u.Angstrom:
             _log.debug("Skipping small dz = " + str(dz))
             # TODO: make this scale with physics and only skip un-interesting
             # distances instead of this arbitrary length -douglase
@@ -718,7 +728,7 @@ class FresnelWavefront(BaseWavefront):
         # Transfer Function of diffraction propagation eq. 22, eq. 87
         wavelen_m = self.wavelength.to(u.m).value
 
-        if accel_math._USE_NUMEXPR:
+        if accel_math._USE_NUMEXPR and not accel_math._USE_CUPY:
             exp_t = ne.evaluate("exp(-1.0j * pi * wavelen_m * (z_direct) * rhosqr)")
         else:
             exp_t = np.exp(-1.0j * np.pi * wavelen_m * z_direct * rhosqr)
@@ -768,7 +778,7 @@ class FresnelWavefront(BaseWavefront):
         else:
             self._fft()
 
-        self.pixelscale = self.wavelength * np.abs(dz) / (self.n * u.pixel * self.pixelscale) / u.pixel
+        self.pixelscale = self.wavelength * abs(dz) / (self.n * u.pixel * self.pixelscale) / u.pixel
         self.z += dz
         self.history.append("Propagated Waist to Spherical, dz = " + str(dz))
         self.spherical = True  # wavefront is now spherical
@@ -810,7 +820,7 @@ class FresnelWavefront(BaseWavefront):
             self._fft()
 
         # update to new pixel scale before applying curvature
-        self.pixelscale = self.wavelength * np.abs(dz) / (self.n * u.pixel * self.pixelscale) / u.pixel
+        self.pixelscale = self.wavelength * abs(dz) / (self.n * u.pixel * self.pixelscale) / u.pixel
         self *= _QuadPhaseShifted(dz)
         self.z += dz
         self.history.append("Propagated Spherical to Waist, dz = " + str(dz))
@@ -826,7 +836,7 @@ class FresnelWavefront(BaseWavefront):
             distance from the beam waist
 
         """
-        return np.abs(self.z_w0 - z) < self.z_r
+        return abs(self.z_w0 - z) < self.z_r
 
     @utils.quantity_input(delta_z=u.meter)
     def propagate_fresnel(self, delta_z, display_intermed=False):
@@ -942,7 +952,7 @@ class FresnelWavefront(BaseWavefront):
         # We decided based on whether the last waist is outside the rayleigh distance.
         #  I.e. here we neglect small curvature just away from the waist
         # Based on that, determine the radius of curvature of the output beam
-        if np.abs(self.z_w0 - self.z) > self.rayleigh_factor * self.z_r:
+        if abs(self.z_w0 - self.z) > self.rayleigh_factor * self.z_r:
             _log.debug("spherical beam")
             _log.debug(self.param_str)
             r_input_beam = self.z - self.z_w0
@@ -961,12 +971,12 @@ class FresnelWavefront(BaseWavefront):
         # update the wavefront parameters to the post-lens beam waist
         if self.r_c() == optic.fl:
             self.z_w0 = self.z
-            self.w_0 = spot_radius
+            self.w_0 = spot_radius*u.m
             _log.debug(str(optic.name) + " has a flat output wavefront")
         else:
             self.z_w0 = -r_output_beam / (
                 1.0 + (self.wavelength * r_output_beam / (np.pi * spot_radius ** 2)) ** 2) + self.z
-            self.w_0 = spot_radius / np.sqrt(1.0 + (np.pi * spot_radius ** 2 / (self.wavelength * r_output_beam)) ** 2)
+            self.w_0 = spot_radius / numpy.sqrt(1.0 + (np.pi * spot_radius ** 2 / (self.wavelength * r_output_beam)) ** 2)
             _log.debug(str(optic.name) + " has a curvature of ={0:0.2e}".format(r_output_beam))
             _log.debug(str(optic.name) + " has a curved output wavefront, with waist at {}".format(self.z_w0))
 
@@ -975,7 +985,7 @@ class FresnelWavefront(BaseWavefront):
         # Update the focal length of the beam. This is closely related to but tracked separately from
         # the beam waist and radius of curvature; we keep track of it to use in optional conversion
         # of coordinates to angular units.
-        if not np.isfinite(self.focal_length):
+        if not numpy.isfinite(self.focal_length):
             self.focal_length = 1 * optic.fl
             _log.debug("Set output beam focal length to {}".format(self.focal_length))
         else:
@@ -1002,7 +1012,7 @@ class FresnelWavefront(BaseWavefront):
         # Now we need to figure out the phase term to apply to the wavefront
         # data array
         if not self.spherical:
-            if np.abs(self.z_w0 - self.z) < self.z_r:
+            if abs(self.z_w0 - self.z) < self.z_r:
                 _log.debug('Near-field, Plane-to-Plane Propagation.')
                 z_eff = 1 * optic.fl
 
@@ -1017,7 +1027,7 @@ class FresnelWavefront(BaseWavefront):
                 self.spherical = True
 
         else:  # spherical input wavefront
-            if np.abs(self.z_w0 - self.z) > self.z_r:
+            if abs(self.z_w0 - self.z) > self.z_r:
                 _log.debug('Spherical to Spherical wavefront propagation.')
                 _log.debug("1/fl={0:0.4e}".format(1.0 / optic.fl))
                 _log.debug("1.0/(R_input_beam)={0:0.4e}".format(1.0 / r_input_beam))
@@ -1056,13 +1066,13 @@ class FresnelWavefront(BaseWavefront):
 
         # get the fpm phasor either using numexpr or numpy
         scale = 2. * np.pi / self.wavelength.to(u.meter).value
-        if accel_math._USE_NUMEXPR:
+        if accel_math._USE_NUMEXPR and not accel_math._USE_CUPY:
             _log.debug("Calculating FPM phasor from numexpr.")
             trans = optic.get_transmission(self)
             opd = optic.get_opd(self)
             fpm_phasor = ne.evaluate("trans * exp(1.j * opd * scale)")
         else:
-            _log.debug("numexpr not available, calculating FPM phasor with numpy.")
+            _log.debug("Calculating FPM phasor with numpy/cupy.")
             fpm_phasor = optic.get_transmission(self) * np.exp(1.j * optic.get_opd(self) * scale)
         
         nfpm = fpm_phasor.shape[0]

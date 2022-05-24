@@ -11,7 +11,6 @@ import time
 import logging
 _log = logging.getLogger('poppy')
 
-
 try:
     # try to import FFTW to see if it is available
     import pyfftw
@@ -60,6 +59,15 @@ try:
 except ImportError:
     _OPENCL_AVAILABLE = False
 
+try: ###############################################################
+    import cupy as cp
+    _CUPY_PLANS = {} 
+    _CUPY_AVAILABLE = True
+except:
+    cp = None
+    _CUPY_AVAILABLE = False    
+
+_USE_CUPY = (conf.use_cupy and _CUPY_AVAILABLE)
 _USE_CUDA = (conf.use_cuda and _CUDA_AVAILABLE)
 _USE_OPENCL = (conf.use_opencl and _OPENCL_AVAILABLE)
 _USE_NUMEXPR = (conf.use_numexpr and _NUMEXPR_AVAILABLE)
@@ -71,6 +79,7 @@ def update_math_settings():
     """ Update the module-level math flags, based on user settings
     """
     global _USE_CUDA, _USE_OPENCL, _USE_NUMEXPR, _USE_FFTW, _USE_MKL
+    _USE_CUPY = (conf.use_cupy and _CUPY_AVAILABLE)
     _USE_CUDA = (conf.use_cuda and _CUDA_AVAILABLE)
     _USE_OPENCL = (conf.use_opencl and _OPENCL_AVAILABLE)
     _USE_NUMEXPR = (conf.use_numexpr and _NUMEXPR_AVAILABLE)
@@ -93,7 +102,7 @@ def _complex():
 def _r(x, y):
     """ Function to speed up computing the radius given x and y, using Numexpr if available
     Otherwise defaults to numpy. """
-    if _USE_NUMEXPR:
+    if _USE_NUMEXPR and not _USE_CUPY:
         return ne.evaluate("sqrt(x**2+y**2)")
     else:
         return np.sqrt(x ** 2 + y ** 2)
@@ -105,8 +114,10 @@ def _exp(x):
     Otherwise defaults to np.exp()
 
     """
-    if _USE_NUMEXPR:
+    if _USE_NUMEXPR and not _USE_CUPY:
         return ne.evaluate("exp(x)", optimization='moderate', )
+    elif _USE_CUPY:
+        return cp.exp(x)
     else:
         return np.exp(x)
 
@@ -128,6 +139,8 @@ def _fftshift(x):
         numBlocks = (int(N/blockdim[0]),int(N/blockdim[1]))
         cufftShift_2D_kernel[numBlocks, blockdim](x.ravel(),N)
         return x
+    elif _USE_CUPY:
+        return cp.fft.fftshift(x)
     else:
         return np.fft.fftshift(x)
 
@@ -153,6 +166,8 @@ def _ifftshift(x):
         numBlocks = (int(N/blockdim[0]),int(N/blockdim[1]))
         cufftShift_2D_kernel[numBlocks, blockdim](x.ravel(),N)
         return x
+    elif _USE_CUPY:
+        return cp.fft.ifftshift(x)
     else:
         return np.fft.ifftshift(x)
 
@@ -192,7 +207,7 @@ def fft_2d(wavefront, forward=True, normalization=None, fftshift=True):
 
     """
     ## To use a fast FFT, it must both be enabled and the library itself has to be present
-    global _USE_OPENCL, _USE_CUDA # need to declare global in case we need to change it, below
+    global _USE_OPENCL, _USE_CUDA, _USE_CUPY # need to declare global in case we need to change it, below
     t0 = time.time()
 
     # OpenCL cfFFT only can FFT certain array sizes.
@@ -206,6 +221,8 @@ def fft_2d(wavefront, forward=True, normalization=None, fftshift=True):
         method = 'pyculib (CUDA GPU)'
     elif _USE_OPENCL:
         method = 'pyopencl (OpenCL GPU)'
+    elif _USE_CUPY:
+        method = 'cupy (GPU)'
     elif _USE_MKL:
         method = 'mkl_fft'
     elif _USE_FFTW:
@@ -255,7 +272,13 @@ def fft_2d(wavefront, forward=True, normalization=None, fftshift=True):
         event.wait()
         wavefront[:] = wf_on_gpu.get()
         del wf_on_gpu
-
+        
+    if _USE_CUPY: #########################################################################
+        do_fft = cp.fft.fft2 if forward else cp.fft.ifft2
+        if normalization is None:
+            normalization = 1./wavefront.shape[0] if forward else wavefront.shape[0]
+        wavefront = do_fft(wavefront)
+    
     elif _USE_MKL:
         # Intel MKL is a drop-in replacement for numpy fft but much faster
         do_fft = mkl_fft.fft2 if forward else mkl_fft.ifft2

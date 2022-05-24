@@ -15,6 +15,16 @@ from .poppy_core import OpticalElement, Wavefront, BaseWavefront, PlaneType, _RA
 from .accel_math import _exp, _r, _float, _complex
 from . import geometry
 
+from importlib import reload
+
+import numpy
+if accel_math._USE_CUPY:
+    import cupy as np
+    from cupyx.scipy.special import j1
+else:
+    import numpy as np
+    from scipy.special import j1
+
 if accel_math._USE_NUMEXPR:
     import numexpr as ne
 
@@ -119,7 +129,7 @@ class AnalyticOpticalElement(OpticalElement):
             wavelength = wave
         scale = 2. * np.pi / wavelength.to(u.meter).value
 
-        if accel_math._USE_NUMEXPR:
+        if accel_math._USE_NUMEXPR and not accel_math._USE_CUPY:
             trans = self.get_transmission(wave)
             opd = self.get_opd(wave)
             # we first multiply the two scalars, for a slight performance gain
@@ -326,9 +336,12 @@ class AnalyticOpticalElement(OpticalElement):
             else:
                 y -= float(self.shift_y)
         if hasattr(self, "rotation"):
-            angle = np.deg2rad(self.rotation)
-            xp = np.cos(angle) * x + np.sin(angle) * y
-            yp = -np.sin(angle) * x + np.cos(angle) * y
+#             angle = np.deg2rad(self.rotation)
+#             xp = np.cos(angle) * x + np.sin(angle) * y
+#             yp = -np.sin(angle) * x + np.cos(angle) * y
+            angle = numpy.deg2rad(self.rotation)
+            xp = numpy.cos(angle).value * x + numpy.sin(angle).value * y
+            yp = -numpy.sin(angle).value * x + numpy.cos(angle).value * y
             x = xp
             y = yp
         # inclination around X axis rescales Y, and vice versa:
@@ -464,8 +477,8 @@ class BandLimitedCoronagraph(AnalyticImagePlaneElement):
             raise ValueError("Invalid value for kind of BLC: " + self.kind)
         self.sigma = float(sigma)  # size parameter. See section 2.1 of Krist et al. SPIE 2007, 2009
         if wavelength is not None:
-            self.wavelength = float(wavelength)  # wavelength, for selecting the
-            # linear wedge option only
+            self.wavelength = float(wavelength.value)  # wavelength, for selecting the
+            # linear wedge option only, FIXED by adding .value
         self._default_display_size = 20. * u.arcsec  # default size for onscreen display, sized for NIRCam
 
     def get_transmission(self, wave):
@@ -493,7 +506,8 @@ class BandLimitedCoronagraph(AnalyticImagePlaneElement):
             sigmar = self.sigma * r
             sigmar.clip(np.finfo(sigmar.dtype).tiny, out=sigmar)  # avoid divide by zero -> NaNs
 
-            self.transmission = (1 - (2 * scipy.special.jn(1, sigmar) / sigmar) ** 2)
+#             self.transmission = (1 - (2 * scipy.special.jn(1, sigmar) / sigmar) ** 2)
+            self.transmission = (1 - (2 * j1(sigmar) / sigmar) ** 2)
             self.transmission[r == 0] = 0  # special case center point (value based on L'Hopital's rule)
         elif self.kind == 'nircamcircular':
             # larger sigma implies narrower peak? TBD verify if this is correct
@@ -1208,7 +1222,7 @@ class HexagonAperture(AnalyticOpticalElement):
         elif diameter is not None:
             self.side = diameter / 2
         else:
-            self.side = flattoflat / np.sqrt(3.)
+            self.side = flattoflat / numpy.sqrt(3.)
 
         self.pupil_diam = 2 * self.side  # for creating input wavefronts
         self._default_display_size = 3 * self.side
@@ -1423,8 +1437,8 @@ class MultiHexagonAperture(MultiSegmentAperture):
         elif side is not None:
             self.side = side
         else:
-            self.side = flattoflat / np.sqrt(3.)
-        self.flattoflat = self.side * np.sqrt(3)
+            self.side = flattoflat / numpy.sqrt(3.)
+        self.flattoflat = self.side * numpy.sqrt(3)
 
         super().__init__(name=name, segment_size=self.flattoflat,
                          gap=gap, rings=rings, segmentlist=segmentlist, center=center, **kwargs)
@@ -1475,6 +1489,8 @@ class NgonAperture(AnalyticOpticalElement):
         radius to the vertices, meters. Default is 1.
     rotation : float
         Rotation angle to first vertex, in degrees counterclockwise from the +X axis. Default is 0.
+        
+    TODO: get_transmission() extremely slow when using CuPy, find better solution
     """
 
     @utils.quantity_input(radius=u.meter)
@@ -1497,14 +1513,19 @@ class NgonAperture(AnalyticOpticalElement):
         phase = self.rotation * np.pi / 180
         vertices = np.zeros((self.nsides, 2), dtype=_float())
         for i in range(self.nsides):
-            vertices[i] = [np.cos(i * 2 * np.pi / self.nsides + phase),
-                           np.sin(i * 2 * np.pi / self.nsides + phase)]
+#             vertices[i] = [np.cos(i * 2 * np.pi / self.nsides + phase),
+#                            np.sin(i * 2 * np.pi / self.nsides + phase)]
+            vertices[i,0] = np.cos(i * 2 * np.pi / self.nsides + phase)
+            vertices[i,1] = np.sin(i * 2 * np.pi / self.nsides + phase)
         vertices *= self.radius.to(u.meter).value
 
         self.transmission = np.zeros(wave.shape, dtype=_float())
         for row in range(wave.shape[0]):
             pts = np.asarray(list(zip(x[row], y[row])))
-            ok = matplotlib.path.Path(vertices).contains_points(pts)
+            if accel_math._USE_CUPY:
+                ok = matplotlib.path.Path(vertices.get()).contains_points(pts.get()) # extremely slow
+            else: 
+                ok = matplotlib.path.Path(vertices).contains_points(pts)
             self.transmission[row][ok] = 1.0
 
         return self.transmission
@@ -1599,7 +1620,7 @@ class RectangleAperture(AnalyticOpticalElement):
             name = "Rectangle, size= {s.width:.1f} wide * {s.height:.1f} high".format(s=self)
         AnalyticOpticalElement.__init__(self, name=name, planetype=PlaneType.pupil, rotation=rotation, **kwargs)
         # for creating input wavefronts:
-        self.pupil_diam = np.sqrt(self.height ** 2 + self.width ** 2)
+        self.pupil_diam = numpy.sqrt(self.height ** 2 + self.width ** 2)
 
     def get_transmission(self, wave):
         """ Compute the transmission inside/outside of the occulter.
@@ -1749,18 +1770,18 @@ class AsymmetricSecondaryObscuration(SecondaryObscuration):
                  support_offset_x=0.0, support_offset_y=0.0, **kwargs):
         SecondaryObscuration.__init__(self, n_supports=len(support_angle), **kwargs)
 
-        self.support_angle = np.asarray(support_angle)
+        self.support_angle = numpy.asarray(support_angle)
 
-        if np.isscalar(support_width.value):
-            support_width = np.zeros(len(support_angle)) + support_width
+        if numpy.isscalar(support_width.value):
+            support_width = numpy.zeros(len(support_angle)) + support_width
         self.support_width = support_width
 
-        if np.isscalar(support_offset_x):
-            support_offset_x = np.zeros(len(support_angle)) + support_offset_x
+        if numpy.isscalar(support_offset_x):
+            support_offset_x = numpy.zeros(len(support_angle)) + support_offset_x
         self.support_offset_x = support_offset_x
 
-        if np.isscalar(support_offset_y):
-            support_offset_y = np.zeros(len(support_angle)) + support_offset_y
+        if numpy.isscalar(support_offset_y):
+            support_offset_y = numpy.zeros(len(support_angle)) + support_offset_y
         self.support_offset_y = support_offset_y
 
     def get_transmission(self, wave):
@@ -1889,7 +1910,7 @@ class GaussianAperture(AnalyticOpticalElement):
         elif w is not None:
             self.w = w
         elif fwhm is not None:
-            self.w = fwhm / (2 * np.sqrt(np.log(2)))
+            self.w = fwhm / (2 * numpy.sqrt(numpy.log(2)))
 
         if pupil_diam is None:
             pupil_diam = 3 * self.fwhm  # for creating input wavefronts
@@ -1900,7 +1921,7 @@ class GaussianAperture(AnalyticOpticalElement):
 
     @property
     def fwhm(self):
-        return self.w * (2 * np.sqrt(np.log(2)))
+        return self.w * (2 * numpy.sqrt(numpy.log(2)))
 
     def get_transmission(self, wave):
         """ Compute the transmission inside/outside of the aperture.

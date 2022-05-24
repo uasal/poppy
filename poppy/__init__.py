@@ -68,6 +68,9 @@ class Conf(_config.ConfigNamespace):
             'is available)?')
     use_opencl = _config.ConfigItem(True, 'Use OpenCL for FFTs on GPU (assuming it' +
             'is available)?')
+    use_cupy = _config.ConfigItem(True, 'Use cupy for FFTs on GPU (assuming it' +
+            'is available)?')
+    
     use_numexpr = _config.ConfigItem(True, 'Use NumExpr to accelerate array math (assuming it' +
             'is available)?')
 
