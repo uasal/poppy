@@ -27,13 +27,9 @@ from importlib import reload
 
 from . import accel_math
 
-import numpy
-if accel_math._USE_CUPY:
-    import cupy as np
-    rnd = numpy.round
-else:
-    import numpy as np
-    rnd = np.round
+accel_math.update_math_settings()
+global _ncp, _scipy
+from .accel_math import _ncp, _scipy
 
 try:
     import pyfftw
@@ -281,7 +277,7 @@ def display_psf(hdulist_or_filename, ext=0, vmin=1e-7, vmax=1e-1,
                 orientation=colorbar_orientation
             )
         if scale.lower() == 'log':
-            ticks = np.logspace(np.log10(vmin), np.log10(vmax), int(rnd(np.log10(vmax / vmin) + 1)))
+            ticks = np.logspace(np.log10(vmin), np.log10(vmax), int(np.round(np.log10(vmax / vmin) + 1)))
             if colorbar_orientation == 'horizontal' and vmax == 1e-1 and vmin == 1e-8:
                 ticks = [1e-8, 1e-6, 1e-4, 1e-2, 1e-1]  # looks better
             cb.set_ticks(ticks)
@@ -1099,9 +1095,11 @@ def pad_to_oversample(array, oversample):
     ---------
     padToSize
     """
+    global _ncp
+    from .accel_math import _ncp
     npix = array.shape[0]
-    n = int(rnd(npix * oversample))
-    padded = np.zeros(shape=(n, n), dtype=array.dtype)
+    n = int(np.round(npix * oversample))
+    padded = _ncp.zeros(shape=(n, n), dtype=array.dtype)
     n0 = float(npix) * (oversample - 1) / 2
     n1 = n0 + npix
     n0 = int(round(n0))  # because astropy test_plugins enforces integer indices
@@ -1131,7 +1129,9 @@ def pad_to_size(array, padded_shape):
     ---------
     pad_to_oversample, pad_or_crop_to_shape
     """
-
+    global _ncp
+    from .accel_math import _ncp
+    
     if len(padded_shape) < 2:
         outsize0 = padded_shape
         outsize1 = padded_shape
@@ -1139,7 +1139,7 @@ def pad_to_size(array, padded_shape):
         outsize0 = padded_shape[0]
         outsize1 = padded_shape[1]
     # npix = array.shape[0]
-    padded = np.zeros(shape=padded_shape, dtype=array.dtype)
+    padded = _ncp.zeros(shape=padded_shape, dtype=array.dtype)
     n0 = (outsize0 - array.shape[0]) // 2  # pixel offset for the inner array
     m0 = (outsize1 - array.shape[1]) // 2  # pixel offset in second dimension
     n1 = n0 + array.shape[0]
@@ -1174,22 +1174,22 @@ def pad_or_crop_to_shape(array, target_shape):
     pad_to_oversample, pad_to_size
 
     """
-
+    global _ncp
+    from .accel_math import _ncp
+    
     if array.shape == target_shape:
         return array
 
     lx, ly = array.shape
     lx_w, ly_w = target_shape
-#     border_x = np.abs(lx - lx_w) // 2
-#     border_y = np.abs(ly - ly_w) // 2
-    border_x = abs(lx - lx_w) // 2
-    border_y = abs(ly - ly_w) // 2
+    border_x = _ncp.abs(lx - lx_w) // 2
+    border_y = _ncp.abs(ly - ly_w) // 2
 
     if (lx < lx_w) or (ly < ly_w):
         _log.debug("Array shape " + str(array.shape) + " is smaller than desired shape " + str(
             [lx_w, ly_w]) + "; will attempt to zero-pad the array")
 
-        resampled_array = np.zeros(shape=(lx_w, ly_w), dtype=array.dtype)
+        resampled_array = _ncp.zeros(shape=(lx_w, ly_w), dtype=array.dtype)
         resampled_array[border_x:border_x + lx, border_y:border_y + ly] = array
         _log.debug("  Padded with a {:d} x {:d} border to "
                    " match the desired shape".format(border_x, border_y))
@@ -1236,7 +1236,9 @@ def rebin_array(a=None, rc=(2, 2), verbose=False):
     anand@stsci.edu
 
     """
-
+    global _ncp
+    from .accel_math import _ncp
+    
     r, c = rc
 
     R = a.shape[0]
@@ -1254,7 +1256,7 @@ def rebin_array(a=None, rc=(2, 2), verbose=False):
             print("row loop")
         for ci in range(0, nc):
             Clo = ci * c
-            b[ri, ci] = np.add.reduce(a[Rlo:Rlo + r, Clo:Clo + c].copy().flat)
+            b[ri, ci] = _ncp.add.reduce(a[Rlo:Rlo + r, Clo:Clo + c].copy().flat)
             if verbose:
                 print("    [%d:%d, %d:%d]" % (Rlo, Rlo + r, Clo, Clo + c))
                 print("%4.0f" % np.add.reduce(a[Rlo:Rlo + r, Clo:Clo + c].copy().flat))

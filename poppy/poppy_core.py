@@ -1,3 +1,4 @@
+import numpy as np
 import multiprocessing
 import copy
 import time
@@ -15,21 +16,17 @@ import astropy.units as u
 from .matrixDFT import MatrixFourierTransform
 from . import utils
 from . import conf
+
 from . import accel_math
 from .accel_math import _float, _complex
 
+accel_math.update_math_settings()
+global _ncp, _scipy
+from .accel_math import _ncp, _scipy
+
 if accel_math._USE_NUMEXPR:
     import numexpr as ne
-
-import numpy
-if accel_math._USE_CUPY:
-    import cupy as np
-    import cupyx.scipy.ndimage as ndimage
-else:
-    import numpy as np
-    import scipy.ndimage as ndimage
     
-
 import logging
 
 _log = logging.getLogger('poppy')
@@ -114,7 +111,7 @@ class BaseWavefront(ABC):
     @utils.quantity_input(wavelength=u.meter, diam=u.meter)
     def __init__(self, wavelength=1e-6 * u.meter, npix=1024, dtype=None, diam=1.0 * u.meter,
                  oversample=2):
-
+        
         self.oversample = oversample
 
         self.wavelength = wavelength  # Wavelength in meters (or other unit if specified)
@@ -134,7 +131,7 @@ class BaseWavefront(ABC):
 
         if dtype is None:
             dtype = _complex()
-        self.wavefront = np.ones((npix, npix), dtype=dtype)  # the actual complex wavefront array
+        self.wavefront = _ncp.ones((npix, npix), dtype=dtype)  # the actual complex wavefront array
         self.ispadded = False  # is the wavefront padded for oversampling?
         self.history = []  # List of strings giving a descriptive history of actions
                            # performed on the wavefront. Saved to FITS headers.
@@ -145,7 +142,7 @@ class BaseWavefront(ABC):
 
         self.current_plane_index = 0  # For tracking stages in a calculation
 
-        accel_math.update_math_settings()                   # ensure optimal propagation based on user settings
+#         accel_math.update_math_settings()                   # ensure optimal propagation based on user settings
 
     def __str__(self):
         # TODO add switches for image/pupil planes
@@ -258,34 +255,34 @@ class BaseWavefront(ABC):
 
         if what.lower() == 'all':
             intens = get_unpadded(self.intensity)
-            outarr = np.zeros((3, intens.shape[0], intens.shape[1]))
+            outarr = _ncp.zeros((3, intens.shape[0], intens.shape[1]))
             outarr[0, :, :] = intens
             outarr[1, :, :] = get_unpadded(self.amplitude)
             outarr[2, :, :] = get_unpadded(self.phase)
-            outfits = fits.HDUList(fits.PrimaryHDU(outarr))
+            outfits = fits.HDUList(fits.PrimaryHDU(outarr.get() if accel_math._USE_CUPY else outarr))
             outfits[0].header['PLANE1'] = 'Wavefront Intensity'
             outfits[0].header['PLANE2'] = 'Wavefront Amplitude'
             outfits[0].header['PLANE3'] = 'Wavefront Phase'
         elif what.lower() == 'parts':
             amp = get_unpadded(self.amplitude)
-            outarr = np.zeros((2, amp.shape[0], amp.shape[1]))
+            outarr = _ncp.zeros((2, amp.shape[0], amp.shape[1]))
             outarr[0, :, :] = amp
             outarr[1, :, :] = get_unpadded(self.phase)
-            outfits = fits.HDUList(fits.PrimaryHDU(outarr))
+            outfits = fits.HDUList(fits.PrimaryHDU(outarr.get() if accel_math._USE_CUPY else outarr))
             outfits[0].header['PLANE1'] = 'Wavefront Amplitude'
             outfits[0].header['PLANE2'] = 'Wavefront Phase'
         elif what.lower() == 'intensity':
             outfits = fits.HDUList(fits.PrimaryHDU(get_unpadded(self.intensity.get() if accel_math._USE_CUPY else self.intensity)))
             outfits[0].header['PLANE1'] = 'Wavefront Intensity'
         elif what.lower() == 'phase':
-            outfits = fits.HDUList(fits.PrimaryHDU(get_unpadded(self.phase)))
+            outfits = fits.HDUList(fits.PrimaryHDU(get_unpadded(self.phase.get() if accel_math._USE_CUPY else self.phase)))
             outfits[0].header['PLANE1'] = 'Phase'
         elif what.lower() == 'complex':
             real = get_unpadded(self.wavefront.real)
-            outarr = np.zeros((2, real.shape[0], real.shape[1]))
+            outarr = _ncp.zeros((2, real.shape[0], real.shape[1]))
             outarr[0, :, :] = real
             outarr[1, :, :] = get_unpadded(self.wavefront.imag)
-            outfits = fits.HDUList(fits.PrimaryHDU(outarr))
+            outfits = fits.HDUList(fits.PrimaryHDU(outarr.get() if accel_math._USE_CUPY else outarr))
             outfits[0].header['PLANE1'] = 'Real part of complex wavefront'
             outfits[0].header['PLANE2'] = 'Imaginary part of complex wavefront'
         else:
@@ -756,6 +753,8 @@ class BaseWavefront(ABC):
         Returns
         -------
         The wavefront object is modified to have the appropriate pixel scale and spatial extent.
+        
+        FIXME: Figure out a way to resample with CuPy without transferring arrays from GPU.
 
         """
         import scipy.interpolate
@@ -774,7 +773,7 @@ class BaseWavefront(ABC):
 
         def make_axis(npix, step):
             """ Helper function to make coordinate axis for interpolation """
-            return step * np.arange(-npix // 2, npix // 2, dtype=np.float64)
+            return step * _ncp.arange(-npix // 2, npix // 2, dtype=_ncp.float64)
 
         # Provide 2-pixel margin around image to reduce interpolation errors at edge, but also make
         # sure that image is centered properly after it gets cropped down to detector size
@@ -809,7 +808,7 @@ class BaseWavefront(ABC):
             wfarr = cropped_wf
         real_resampled = interpolator(wfarr.real)(x_out, y_out)
         imag_resampled = interpolator(wfarr.imag)(x_out, y_out)
-        new_wf = np.array(real_resampled + 1j * imag_resampled)
+        new_wf = _ncp.array(real_resampled + 1j * imag_resampled)
 
         # enforce conservation of energy:
         new_wf *= 1. / pixscale_ratio
@@ -901,8 +900,8 @@ class BaseWavefront(ABC):
             rot_imag = np.rot90(self.wavefront.imag, k=-k)
         else:
             # arbitrary free rotation with interpolation
-            rot_real = ndimage.interpolation.rotate(self.wavefront.real, -angle, reshape=False)  # negative = CCW
-            rot_imag = ndimage.interpolation.rotate(self.wavefront.imag, -angle, reshape=False)
+            rot_real = _scipy.ndimage.interpolation.rotate(self.wavefront.real, -angle, reshape=False)  # negative = CCW
+            rot_imag = _scipy.ndimage.interpolation.rotate(self.wavefront.imag, -angle, reshape=False)
         self.wavefront = rot_real + 1.j * rot_imag
 
         self.history.append('Rotated by {:.2f} degrees, CCW'.format(angle))
@@ -979,6 +978,11 @@ class Wavefront(BaseWavefront):
     @utils.quantity_input(wavelength=u.meter, diam=u.meter, pixelscale=u.arcsec / u.pixel)
     def __init__(self, wavelength=1e-6 * u.meter, npix=1024, dtype=None, diam=8.0 * u.meter,
                  oversample=2, pixelscale=None):
+        
+        accel_math.update_math_settings()                   # ensure optimal propagation based on user settings
+        global _ncp, _scipy
+        from .accel_math import _ncp, _scipy
+        
         super(Wavefront, self).__init__(wavelength=wavelength,
                                         npix=npix,
                                         dtype=dtype,
@@ -1251,7 +1255,7 @@ class Wavefront(BaseWavefront):
             the pixel scale in meters/pixel, optionally different in
             X and Y
         """
-        y, x = np.indices(shape, dtype=_float())
+        y, x = _ncp.indices(shape, dtype=_float())
         pixelscale_mpix = pixelscale.to(u.meter / u.pixel).value if isinstance(pixelscale, u.Quantity) else pixelscale
         if not np.isscalar(pixelscale_mpix):
             pixel_scale_x, pixel_scale_y = pixelscale_mpix
@@ -1287,7 +1291,7 @@ class Wavefront(BaseWavefront):
             Was POPPY trying to keeping the center of the image on
             a pixel, crosshairs ('array_center'), or corner?
         """
-        y, x = np.indices(shape, dtype=_float())
+        y, x = _ncp.indices(shape, dtype=_float())
         pixelscale_arcsecperpix = pixelscale.to(u.arcsec / u.pixel).value
         if not np.isscalar(pixelscale_arcsecperpix):
             pixel_scale_x, pixel_scale_y = pixelscale_arcsecperpix
@@ -1403,6 +1407,11 @@ class BaseOpticalSystem(ABC):
     """
     def __init__(self, name="unnamed system", verbose=True, oversample=2,
                  npix=None, pupil_diameter=None):
+        
+        accel_math.update_math_settings()
+        global _ncp
+        from .accel_math import _ncp
+        
         self.name = name
         self.verbose = verbose
         self.planes = []  # List of OpticalElements
@@ -1591,7 +1600,7 @@ class BaseOpticalSystem(ABC):
         # ensure wavelength is a quantity which is iterable:
         # (the check for a quantity of type length is applied in the decorator)
         if np.isscalar(wavelength.value):
-            wavelength = numpy.asarray([wavelength.value], dtype=_float()) * wavelength.unit
+            wavelength = np.asarray([wavelength.value], dtype=_float()) * wavelength.unit
 
         if weight is None:
             weight = [1.0] * len(wavelength)
@@ -1610,7 +1619,7 @@ class BaseOpticalSystem(ABC):
         else:
             retain_intermediates = False
 
-        normwts = numpy.asarray(weight, dtype=_float())
+        normwts = np.asarray(weight, dtype=_float())
         normwts /= normwts.sum()
 
         _USE_FFTW = (conf.use_fftw and accel_math._FFTW_AVAILABLE)
@@ -1735,8 +1744,8 @@ class BaseOpticalSystem(ABC):
             utils.fftw_save_wisdom()
 
         # TODO update FITS header for oversampling here if detector is different from regular?
-        waves = numpy.asarray([w.to_value(u.meter) for w in wavelength])
-        wts = numpy.asarray(weight)
+        waves = np.asarray([w.to_value(u.meter) for w in wavelength])
+        wts = np.asarray(weight)
         mnwave = (waves * wts).sum() / wts.sum()
         outfits[0].header['WAVELEN'] = (mnwave, 'Weighted mean wavelength in meters')
         outfits[0].header['NWAVES'] = (waves.size, 'Number of wavelengths used in calculation')
@@ -2391,7 +2400,11 @@ class OpticalElement(object):
 
     def __init__(self, name="unnamed optic", verbose=True, planetype=PlaneType.unspecified,
                  oversample=1, interp_order=3):
-
+        
+        accel_math.update_math_settings()
+        global _ncp
+        from .accel_math import _ncp
+        
         self.name = name
         """ string. Descriptive Name of this optic"""
         self.verbose = verbose
@@ -2402,8 +2415,8 @@ class OpticalElement(object):
         self._suppress_display = False  # should we avoid displaying this optic on screen?
                                         # (useful for 'virtual' optics like FQPM aligner)
 
-        self.amplitude = np.asarray([1.])
-        self.opd = np.asarray([0.])
+        self.amplitude = _ncp.asarray([1.])
+        self.opd = _ncp.asarray([0.])
         self.pixelscale = None
         self.interp_order = interp_order
 
@@ -2472,14 +2485,14 @@ class OpticalElement(object):
             if hasattr(self, '_resampled_scale') and abs(
                     self._resampled_scale - wave.pixelscale) / self._resampled_scale >= float_tolerance:
                 # we already did this same resampling, so just re-use it!
-                self.phasor = self._resampled_amplitude * np.exp(1.j * self._resampled_opd * scale)
+                self.phasor = self._resampled_amplitude * _ncp.exp(1.j * self._resampled_opd * scale)
             else:
                 # raise NotImplementedError("Need to implement resampling.")
                 zoom = (self.pixelscale / wave.pixelscale).decompose().value
                 original_opd = self.get_opd(wave)
-                resampled_opd = ndimage.zoom(original_opd, zoom, output=original_opd.dtype, order=self.interp_order)
+                resampled_opd = _scipy.ndimage.zoom(original_opd, zoom, output=original_opd.dtype, order=self.interp_order)
                 original_amplitude = self.get_transmission(wave)
-                resampled_amplitude = ndimage.zoom(original_amplitude, zoom, output=original_amplitude.dtype, order=self.interp_order)
+                resampled_amplitude = _scipy.ndimage.zoom(original_amplitude, zoom, output=original_amplitude.dtype, order=self.interp_order)
                 _log.debug("resampled optic to match wavefront via spline interpolation by a" +
                            " zoom factor of {:.3g}".format(zoom))
                 _log.debug("resampled optic shape: {}   wavefront shape: {}".format(resampled_amplitude.shape,
@@ -2495,8 +2508,8 @@ class OpticalElement(object):
                     _log.warning("After resampling, optic phasor shape " + str(np.shape(resampled_opd)) +
                                  " is smaller than input wavefront " + str(
                                  (lx_w, ly_w)) + "; will zero-pad the rescaled array.")
-                    self._resampled_opd = np.zeros([lx_w, ly_w])
-                    self._resampled_amplitude = np.zeros([lx_w, ly_w])
+                    self._resampled_opd = _ncp.zeros([lx_w, ly_w])
+                    self._resampled_amplitude = _ncp.zeros([lx_w, ly_w])
 
                     self._resampled_opd[border_x:border_x + resampled_opd.shape[0],
                                         border_y:border_y + resampled_opd.shape[1]] = resampled_opd
@@ -2511,7 +2524,7 @@ class OpticalElement(object):
                     _log.debug("trimmed a border of {:d} x {:d} pixels from "
                                "optic to match the wavefront".format(border_x, border_y))
 
-                self.phasor = self._resampled_amplitude * np.exp(1.j * self._resampled_opd * scale)
+                self.phasor = self._resampled_amplitude * _ncp.exp(1.j * self._resampled_opd * scale)
 
         else:
             # compute the phasor directly, without any need to rescale.
@@ -2520,7 +2533,7 @@ class OpticalElement(object):
                 opd = self.get_opd(wave)
                 self.phasor = ne.evaluate("trans * exp(1.j * opd * scale)")
             else:
-                self.phasor = self.get_transmission(wave) * np.exp(1.j * self.get_opd(wave) * scale)
+                self.phasor = self.get_transmission(wave) * _ncp.exp(1.j * self.get_opd(wave) * scale)
 
         # check whether we need to pad or crop the array before returning or not.
         # note: do not pad the phasor if it's just a scalar!
@@ -2763,9 +2776,9 @@ class ArrayOpticalElement(OpticalElement):
         if transmission is not None:
             self.amplitude = transmission
             if opd is None:
-                self.opd = np.zeros_like(transmission)
+                self.opd = _ncp.zeros_like(transmission)
         elif transmission is None and opd is not None:
-            self.amplitude = np.ones_like(opd)
+            self.amplitude = _ncp.ones_like(opd)
 
         if pixelscale is not None:
             self.pixelscale = pixelscale
@@ -2885,8 +2898,8 @@ class FITSOpticalElement(OpticalElement):
         if opd is None and transmission is None:  # no input files, so just make a scalar
             _log.warning("No input files specified. You should set transmission=filename or opd=filename.")
             _log.warning("Creating a null optical element. Are you sure that's what you want to do?")
-            self.amplitude = np.asarray([1.])
-            self.opd = np.asarray([0.])
+            self.amplitude = _ncp.asarray([1.])
+            self.opd = _ncp.asarray([0.])
             self.pixelscale = None
             self.name = "-empty-"
         else:
@@ -2897,7 +2910,7 @@ class FITSOpticalElement(OpticalElement):
                     self.amplitude, self.amplitude_header = fits.getdata(self.amplitude_file, header=True)
                     self.amplitude = self.amplitude.astype('=f8')  # ensure native byte order, see #213
                     
-                    self.amplitude = np.array(self.amplitude) # sets to CuPy array if np is cupy
+                    self.amplitude = _ncp.array(self.amplitude) # sets to CuPy array if np is cupy
                     
                     if self.name == 'unnamed optic':
                         self.name = 'Optic from ' + self.amplitude_file
@@ -2929,7 +2942,7 @@ class FITSOpticalElement(OpticalElement):
             # ---- Load OPD file. ---
             if opd is None:
                 # if only amplitude set, create an array of 0s with same size.
-                self.opd = np.zeros(self.amplitude.shape)
+                self.opd = _ncp.zeros(self.amplitude.shape)
                 opdunits = 'meter'  # doesn't matter, it's all zeros, but this will indicate no need to rescale below.
 
             elif isinstance(opd, fits.HDUList):
@@ -2946,7 +2959,7 @@ class FITSOpticalElement(OpticalElement):
                 self.opd, self.opd_header = fits.getdata(self.opd_file, header=True)
                 self.opd = self.opd.astype('=f8')
                 
-                self.opd = np.array(self.opd) # sets to CuPy array if np is cupy
+                self.opd = _ncp.array(self.opd) # sets to CuPy array if np is cupy
                 
                 if self.name == 'unnamed optic': self.name = 'OPD from ' + self.opd_file
                 _log.info(self.name + ": Loaded OPD from " + self.opd_file)
@@ -2977,7 +2990,7 @@ class FITSOpticalElement(OpticalElement):
 
             if transmission is None:
                 _log.info("No info supplied on amplitude transmission; assuming uniform throughput = 1")
-                self.amplitude = np.ones(self.opd.shape)
+                self.amplitude = _ncp.ones(self.opd.shape)
 
             if opdunits is None:
                 try:
@@ -3039,17 +3052,17 @@ class FITSOpticalElement(OpticalElement):
                 k,remainder = np.divmod(rotation, 90)
                 if remainder==0:
                     # rotation is a multiple of 90
-                    self.amplitude = np.rot90(self.amplitude, k=-k)   # negative = CCW
-                    self.opd = np.rot90(self.opd, k=-k)
+                    self.amplitude = _ncp.rot90(self.amplitude, k=-k)   # negative = CCW
+                    self.opd = _ncp.rot90(self.opd, k=-k)
                 else:
                     # arbitrary free rotation with interpolation
                     # do rotation with interpolation, but try to clean up some of the artifacts afterwards.
                     # this is imperfect at best, of course...
-                    self.amplitude = ndimage.interpolation.rotate(self.amplitude, -rotation,  # negative = CCW
+                    self.amplitude = _scipy.ndimage.interpolation.rotate(self.amplitude, -rotation,  # negative = CCW
                                                                   reshape=False).clip(min=0, max=1.0)
                     wnoise = (self.amplitude < 1e-3) & (self.amplitude > 0)
                     self.amplitude[wnoise] = 0
-                    self.opd = ndimage.interpolation.rotate(self.opd, -rotation, reshape=False)  # negative = CCW
+                    self.opd = _scipy.ndimage.interpolation.rotate(self.opd, -rotation, reshape=False)  # negative = CCW
                 _log.info("  Rotated optic by %f degrees counter clockwise." % rotation)
                 self._rotation = rotation
 
@@ -3153,8 +3166,8 @@ class FITSOpticalElement(OpticalElement):
                               rollx * 1.0 / self.amplitude.shape[1], rolly * 1.0 / self.amplitude.shape[0]))
                     self._shift = (rollx * 1.0 / self.amplitude.shape[1], rolly * 1.0 / self.amplitude.shape[0])
 
-                self.amplitude = ndimage.shift(self.amplitude, (rolly, rollx))
-                self.opd = ndimage.shift(self.opd, (rolly, rollx))
+                self.amplitude = _scipy.ndimage.shift(self.amplitude, (rolly, rollx))
+                self.opd = _scipy.ndimage.shift(self.opd, (rolly, rollx))
 
     @property
     def pupil_diam(self):
@@ -3341,14 +3354,14 @@ class Detector(OpticalElement):
         if fov_pixels is None and fov_arcsec is None:
             raise ValueError("Either fov_pixels or fov_arcsec must be specified!")
         elif fov_pixels is not None:
-            self.fov_pixels = numpy.round(fov_pixels)
+            self.fov_pixels = np.round(fov_pixels)
             self.fov_arcsec = self.fov_pixels * self.pixelscale
         else:
             # set field of view to closest value possible to requested,
             # consistent with having an integer number of pixels
-            self.fov_pixels = numpy.round((fov_arcsec.to(u.arcsec) / self.pixelscale).to(u.pixel))
+            self.fov_pixels = np.round((fov_arcsec.to(u.arcsec) / self.pixelscale).to(u.pixel))
             self.fov_arcsec = self.fov_pixels * self.pixelscale
-        if numpy.any(self.fov_pixels <= 0):
+        if np.any(self.fov_pixels <= 0):
             raise ValueError("FOV in pixels must be a positive quantity. Invalid: " + str(self.fov_pixels))
 
         self.amplitude = 1

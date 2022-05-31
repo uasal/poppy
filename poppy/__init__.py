@@ -23,8 +23,7 @@ try:
 except ImportError:
     __version__ = ''
 
-__minimum_python_version__ = "3.7"
-
+__minimum_python_version__ = "3.8"
 
 class UnsupportedPythonError(Exception):
     pass
@@ -68,7 +67,7 @@ class Conf(_config.ConfigNamespace):
             'is available)?')
     use_opencl = _config.ConfigItem(True, 'Use OpenCL for FFTs on GPU (assuming it' +
             'is available)?')
-    use_cupy = _config.ConfigItem(True, 'Use cupy for FFTs on GPU (assuming it' +
+    use_cupy = _config.ConfigItem(True, 'Use CuPy for FFTs on GPU (assuming it' +
             'is available)?')
     
     use_numexpr = _config.ConfigItem(True, 'Use NumExpr to accelerate array math (assuming it' +
